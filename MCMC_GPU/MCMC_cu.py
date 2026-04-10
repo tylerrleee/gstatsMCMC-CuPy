@@ -4,6 +4,10 @@ import torch
 import cupy as cp
 from copy import deepcopy
 from . import gstatsim_custom_gpu as gsim
+import numbers 
+from . import SGS_GPU as sgs_cxt
+
+from . import MC_res
 
 """
 Cupy
@@ -14,6 +18,9 @@ Goals:
 2. Keep RNG on GPU
 3. 
 """
+
+
+""""""
 
 def get_mass_conservation_residual_GPU(bed, surf, velx, vely, dhdt, smb, resolution):
     thick = surf - bed
@@ -84,8 +91,37 @@ def _preprocess(xx, yy, grid, variogram, sim_mask, radius, stencil):
 
     # make stencil for faster nearest neighbor search
     if stencil is None:
-        stencil, _, _ = gsim.neighbors_gpu.make_circle_stencil_gpu_safe(xx[:, 0], radius) # Stencil, [xx_st, yy_st]
+        stencil, _, _ = gsim.neighbors_gpu.make_circle_stencil_gpu_safe(xx[0, :], radius) # Stencil, [xx_st, yy_st]
     return out_grid, cond_msk, inds, vario, global_mean, stencil
+
+def _preprocess_gpu_safe(xx, yy, grid, variogram, sim_mask, radius, stencil, max_memory_gb, dtype=cp.float32):
+    """Common setup: Gaussian transform, index generation, and stencil creation."""
+    cond_msk = ~cp.isnan(grid)
+
+    # 1. Normal Score Transform
+    out_grid, nst_trans = gsim.utilities_gpu.gaussian_transformation_gpu(grid, cond_msk, dtype=dtype)
+
+    # 2. Determine simulation path (mask)
+    if sim_mask is None:
+        sim_mask = cp.full(xx.shape, True)
+
+    ii, jj = cp.meshgrid(cp.arange(xx.shape[0]), cp.arange(xx.shape[1]), indexing='ij')
+    inds = cp.stack([ii[sim_mask].flatten(), jj[sim_mask].flatten()], axis=1)
+
+    # 3. Clean Variogram dict
+    vario = deepcopy(variogram)
+    for k in vario:
+        if isinstance(vario[k], numbers.Number):
+            vario[k] = float(vario[k])
+            
+    global_mean = float(cp.mean(out_grid[cond_msk]))
+
+    # 4. Prepare Stencil for neighbor search
+    if stencil is None:
+        stencil_res = gsim.neighbors_gpu.make_circle_stencil_gpu_safe(xx[0, :], radius, max_memory_gb)
+        stencil = stencil_res if stencil_res[0] is not None else None
+        
+    return out_grid, nst_trans, cond_msk, inds, vario, global_mean, stencil
 
 # Referenced from Matthew's code
 # def sgs(xx, yy, grid, variogram, radius=100e3, num_points=20, ktype='ok', sim_mask=None, quiet=False, stencil=None, rcond=None, seed=None):
@@ -104,10 +140,13 @@ def sgs_gpu(xx, yy, grid, variogram, radius=100e3, num_points=32, ktype='ok',
     assert isinstance(xx, cp.ndarray), 'Error: xx is not a Cupy Array'
     assert isinstance(yy, cp.ndarray), 'Error: yy is not a Cupy Array'
     assert isinstance(grid, cp.ndarray), 'Error: grid is not a Cupy Array'
-    
-    gsim._sanity_checks_gpu(xx, yy, grid, variogram, radius, num_points, ktype)
-    out_grid, cond_msk, inds, vario, global_mean, stencil = _preprocess(xx, yy, grid, variogram, sim_mask, radius, stencil)
+    gsim.interpolate_gpu._sanity_checks_gpu(xx, yy, grid, variogram, radius, num_points, ktype)
+    #out_grid, cond_msk, inds, vario, global_mean, stencil = _preprocess(xx, yy, grid, variogram, sim_mask, radius, stencil)
 
+    out_grid, nst_trans, cond_msk, inds, vario, global_mean, stencil = _preprocess_gpu_safe(
+        xx, yy, grid, variogram, sim_mask, radius, stencil, max_memory_gb, dtype=dtype
+    )
+    
     rng = cp.random.default_rng(seed)
 
     shuffled = cp.copy(inds)
@@ -123,7 +162,7 @@ def sgs_gpu(xx, yy, grid, variogram, radius=100e3, num_points=32, ktype='ok',
         # 2. Kriging Matrix: (K+1)^2 * bytes
         # 3. Intermediate tensors (coords, etc): K * 4*bytes
         
-        bytes_per = 4 if dtype == cp.float32 else 8 # bytes
+        bytes_per = 4 if dtype == cp.float64 else 8 # bytes
         
         # Estimate stencil size (area of circle in pixels)
         dx = float(xx[0,1] - xx[0,0])
@@ -145,18 +184,18 @@ def sgs_gpu(xx, yy, grid, variogram, radius=100e3, num_points=32, ktype='ok',
     pbar = tqdm(total = n_points, desc = "Sequential Gaussian Simulation", unit = "pts")
 
     for bstart in range(0, n_points, batch_size):
-        bend = min(n_points, b_start + batch_size)
+        bend = min(n_points, bstart + batch_size)
         batch_inds = shuffled[bstart:bend].astype(cp.int32)
 
         # 1. Find neighbors
-        neigh, nb_counts = gsim.interpolate_gpu.batch_neighbors_distance_based(
+        neighbors, nb_counts = gsim.interpolate_gpu.batch_neighbors_distance_based(
             batch_inds, ii, jj, xx, yy, out_grid, cond_msk, radius, num_points, max_memory_gb, dtype=dtype
         )
 
         sim_points = cp.stack([xx[batch_inds[:,0], batch_inds[:,1]], 
                                yy[batch_inds[:,0], batch_inds[:,1]]], axis=1)
 
-        valid_mask = counts > 0
+        valid_mask = nb_counts > 0
         if not cp.any(valid_mask):
             pbar.update(bend - bstart)
             continue
@@ -178,7 +217,7 @@ def sgs_gpu(xx, yy, grid, variogram, radius=100e3, num_points=32, ktype='ok',
         # 4. Update Grid and Mask
 
         valid_rows, valid_cols = batch_inds[valid_mask, 0], batch_inds[valid_mask, 1]
-        out_grid[valid_rows, valid_cols]
+        out_grid[valid_rows, valid_cols] = samp
 
         # Update cond mask
         cond_msk[valid_rows, valid_cols] = True
@@ -189,9 +228,9 @@ def sgs_gpu(xx, yy, grid, variogram, radius=100e3, num_points=32, ktype='ok',
     out_grid = cp.nan_to_num(out_grid, nan=0.0, posinf=5.0, neginf=-5.0)
     out_grid = cp.clip(out_grid, -5.0, 5.0)
 
-    sim_trans = nst_trans.inverse_transform(out_grid.reshape(-1, 1)).squeeze().reshape(xx.shape)
+    #sim_trans = nst_trans.inverse_transform(out_grid.reshape(-1, 1)).squeeze().reshape(xx.shape)
 
-    return sim_trans
+    return out_grid
 
 
 class chain_sgs_gpu(chain):
@@ -215,6 +254,9 @@ class chain_sgs_gpu(chain):
                          cond_bed, data_mask, grounded_ice_mask, resolution)
         
         # Convert all 2D grid arrays to CuPy in place | no copy
+        velx[velx < -9000] = np.nan 
+        vely[vely < -9000] = np.nan
+
         self.xx                = cp.asarray(self.xx)
         self.yy                = cp.asarray(self.yy)
         self.initial_bed       = cp.asarray(self.initial_bed)
@@ -234,7 +276,7 @@ class chain_sgs_gpu(chain):
         print('then please set up the loss function using either set_loss_type or set_loss_func')
 
     def loss(self, massConvResidual, dataDiff):
-        loss_mc = cp.nansum(cp.square(massConvResidual[self.mc_region_mask == 1])) / (2 * self.sigma_mc ** 2)
+        loss_mc = cp.nansum(cp.square(massConvResidual[self.mc_region_mask == 1], dtype=cp.float64)) / (2 * self.sigma_mc ** 2)        
         loss_data = 0
         return loss_mc + loss_data, loss_mc, loss_data
         
@@ -268,7 +310,7 @@ class chain_sgs_gpu(chain):
         Raises:
             ValueError: If detrend_map is True but trend has invalid shape.
         """
-
+        trend = cp.asarray(trend)
         assert isinstance(trend, cp.ndarray), 'Error: trend is not a Cupy Array'
 
         if detrend_map == True:
@@ -297,7 +339,16 @@ class chain_sgs_gpu(chain):
         Raises:
             ValueError: If required parameters are missing or in the wrong format.
         """
-            
+        # Cast variogram parameters to standard floats
+        vario_sill = float(vario_sill)
+        vario_nugget = float(vario_nugget)
+        vario_range = float(vario_range)
+  #      vario_azimuth = float(vario_azimuth) 
+ #       vario_smoothness = float(vario_smoothness) if not None
+        
+        if vario_smoothness is not None:
+            vario_smoothness = float(vario_smoothness)
+        
         if (vario_type == 'Gaussian') or (vario_type == 'Exponential') or (vario_type == 'Spherical'):
             print('the variogram is set to type', vario_type)
         elif vario_type == 'Matern':
@@ -308,17 +359,24 @@ class chain_sgs_gpu(chain):
         else:
             raise ValueError('vario_type argument should be one of the following: Gaussian, Exponential, Spherical, or Matern')
         
+        
         self.vario_type = vario_type
         
         if isotropic:
-            vario_azimuth = 0
+            vario_azimuth = 0.0
+            vario_range = float(vario_range)
             self.vario_param = [vario_azimuth, vario_nugget, vario_range, vario_range, vario_sill, vario_type, vario_smoothness]
         else:
-            if (len(vario_range) == 2):
-                print('set to anistropic variogram with major range and minor range to be ', vario_range)
-                self.vario_param = [vario_azimuth, vario_nugget, vario_range[0], vario_range[1], vario_sill, vario_type, vario_smoothness]
+            if (isinstance(vario_range, (list, tuple, np.ndarray)) and len(vario_range) == 2):
+                # Ensure both ranges are native floats
+                r_major = float(vario_range[0])
+                r_minor = float(vario_range[1])
+                vario_azimuth = float(vario_azimuth) if vario_azimuth is not None else 0.0
+                
+                print('set to anisotropic variogram with major range and minor range to be ', [r_major, r_minor])
+                self.vario_param = [vario_azimuth, vario_nugget, r_major, r_minor, vario_sill, vario_type, vario_smoothness]
             else:
-                raise ValueError ("vario_range need to be a list with two floats to specifying for major range and minor range of the variogram when isotropic is set to False")
+                raise ValueError("vario_range needs to be a list with two floats specifying major and minor range when isotropic is False")
     
     def set_sgs_param(self, sgs_num_nearest_neighbors, sgs_searching_radius, sgs_rand_dropout_on = False, dropout_rate = 0):
         """
@@ -367,46 +425,52 @@ class chain_sgs_gpu(chain):
             rng = cp.random.default_rng()
         elif isinstance(rng_seed, int):
             rng = cp.random.default_rng(seed=rng_seed)
-        elif isinstance(rng_seed, cp.random._generator.Generator):
+        elif isinstance(rng_seed, cp.random.Generator):
             rng = rng_seed
         else:
             raise ValueError('Seed should be an integer, a CuPy random Generator, or None')
             
         self.rng = rng
 
-    def run_all_assertions(self):
-        assert isinstance(self.xx, cp.ndarray),                'Error: xx is not a CuPy array'
-        assert isinstance(self.yy, cp.ndarray),                'Error: yy is not a CuPy array'
-        assert isinstance(self.initial_bed, cp.ndarray),       'Error: initial_bed is not a CuPy array'
-        assert isinstance(self.surf, cp.ndarray),              'Error: surf is not a CuPy array'
-        assert isinstance(self.velx, cp.ndarray),              'Error: velx is not a CuPy array'
-        assert isinstance(self.vely, cp.ndarray),              'Error: vely is not a CuPy array'
-        assert isinstance(self.dhdt, cp.ndarray),              'Error: dhdt is not a CuPy array'
-        assert isinstance(self.smb, cp.ndarray),               'Error: smb is not a CuPy array'
-        assert isinstance(self.cond_bed, cp.ndarray),          'Error: cond_bed is not a CuPy array'
-        assert isinstance(self.data_mask, cp.ndarray),         'Error: data_mask is not a CuPy array'
-        assert isinstance(self.grounded_ice_mask, cp.ndarray), 'Error: grounded_ice_mask is not a CuPy array'
-        assert isinstance(self.region_mask, cp.ndarray),       'Error: region_mask is not a CuPy array. Did you call set_update_region()?'
-        assert isinstance(self.mc_region_mask, cp.ndarray),    'Error: mc_region_mask is not a CuPy array. Did you call set_loss_type()?'
+    def ensure_cupy_arrays_and_validate(self):
+        """Ensures all array data is on the GPU and validates scalar parameters."""
+    
+        # 1. attribute arrays
+        # cp.asarray does nothing (zero overhead).
+        array_attrs = [
+            'xx', 'yy', 'initial_bed', 'surf', 'velx', 'vely', 'dhdt',
+            'smb', 'cond_bed', 'data_mask', 'grounded_ice_mask', 
+            'region_mask', 'mc_region_mask'
+        ]
 
-        # Trend is only required when detrending is enabled
+        for attr in array_attrs:
+            val = getattr(self, attr, None)
+            if val is None:
+                raise ValueError(f"Error: {attr} is missing entirely.")
+            # Safely convert to CuPy array (handles NumPy arrays, lists, etc.)
+            setattr(self, attr, cp.asarray(val))
+
+        # 2. Conditional arrays
         if self.detrend_map:
-            assert isinstance(self.trend, cp.ndarray),         'Error: trend is not a CuPy array. Did you call set_trend()?'
+            assert hasattr(self, 'trend'), 'Error: trend is not set. Did you call set_trend()?'
+            self.trend = cp.asarray(self.trend)
 
-        # ── Scalar / non-array parameter checks ────────────────────────
+        if self.sample_loc is not None:
+            self.sample_loc = cp.asarray(self.sample_loc)
+
+        # 3. scalar / non-scalar params check
         assert isinstance(self.resolution, (int, float)),      'Error: resolution is not a scalar'
-        assert isinstance(self.sigma_mc, (int, float)),        'Error: sigma_mc is not set. Did you call set_loss_type()?'
+
+        assert hasattr(self, 'sigma_mc'),                      'Error: sigma_mc is not set. Did you call set_loss_type()?'
+        assert isinstance(self.sigma_mc, (int, float)),        'Error: sigma_mc is not a scalar'
         assert self.sigma_mc > 0,                              'Error: sigma_mc must be positive'
+
         assert hasattr(self, 'vario_param'),                   'Error: vario_param is not set. Did you call set_variogram()?'
         assert hasattr(self, 'sgs_param'),                     'Error: sgs_param is not set. Did you call set_sgs_param()?'
         assert hasattr(self, 'block_min_x'),                   'Error: block sizes not set. Did you call set_block_sizes()?'
 
-        # ── RNG check ──────────────────────────────────────────────────
+        # 4. rng generator check
         assert hasattr(self, 'rng'),                           'Error: rng is not set. Did you call set_random_generator()?'
-
-        # ── Optional: sample_loc check ─────────────────────────────────
-        if self.sample_loc is not None:
-            assert isinstance(self.sample_loc, cp.ndarray),    'Error: sample_loc is not a CuPy array'
 
     def run(self, n_iter, only_save_last_bed=False, info_per_iter=100, plot=True, progress_bar=True):
         """
@@ -428,7 +492,7 @@ class chain_sgs_gpu(chain):
         """
             
         rng = self.rng
-        run_all_assertions()
+        self.ensure_cupy_arrays_and_validate()
         
         rows = self.xx.shape[0]
         cols = self.xx.shape[1]
@@ -441,7 +505,7 @@ class chain_sgs_gpu(chain):
         if not only_save_last_bed:
             bed_cache   = cp.zeros((n_iter, rows, cols))
 
-        blocks_cache    = cp.full((n_iter, 4), np.nan)
+        blocks_cache    = cp.full((n_iter, 4), cp.nan)
         resampled_times = cp.zeros(self.xx.shape)
         
         # if the user request to return bed elevation in some sampling locations
@@ -449,7 +513,7 @@ class chain_sgs_gpu(chain):
             sample_values = cp.zeros((self.sample_loc.shape[0], n_iter))
             
             # convert sample_loc from x and y locations to i and j indexes
-            sample_loc_ij = cp.zeros(self.sample_loc.shape, dtype=np.int16)
+            sample_loc_ij = cp.zeros(self.sample_loc.shape, dtype=cp.int16)
             for k in range(self.sample_loc.shape[0]):
                 sample_i,sample_j = cp.where((self.xx == self.sample_loc[k,0]) & (self.yy == self.sample_loc[k,1]))
                 sample_loc_ij[k,:] = [int(sample_i[0]), int(sample_j[0])]
@@ -463,31 +527,50 @@ class chain_sgs_gpu(chain):
             bed_c = self.initial_bed.copy()
             cond_bed_c = self.cond_bed.copy()
        
+        
+        # NORMAL SPACE INITIAL
         if self.do_transform:
-            nst_trans = self.nst_trans
-            z = nst_trans.transform(bed_c.reshape(-1,1))
-            z_cond_bed = nst_trans.transform(cond_bed_c.reshape(-1,1))
+            nst_trans  = self.nst_trans
+            # Create an array of the bed entirely in Normal Space (z-scores)
+            z_bed_c    = nst_trans.transform(bed_c.reshape(-1,1)).reshape(self.xx.shape)
+            z_cond_bed = nst_trans.transform(cond_bed_c.reshape(-1,1)).reshape(self.xx.shape)
         else:
-            z = bed_c.copy().reshape(-1,1)
-            z_cond_bed = cond_bed_c.copy().reshape(-1,1)
+            # If no transform is used, normal space is just physical space
+            z_bed_c    = bed_c.copy()
+            z_cond_bed = cond_bed_c.copy()
     
         z_cond_bed = z_cond_bed.reshape(self.xx.shape)
 
         resolution = self.resolution
         
-        # initialize loss
+        # INIT LOSS
         if self.detrend_map == True:
-            mc_res = Topography.get_mass_conservation_residual(bed_c + self.trend, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
+            mc_res = MC_res.get_mass_conservation_residual_fused(bed_c + self.trend, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
         else:
-            mc_res = Topography.get_mass_conservation_residual(bed_c, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
+            mc_res = MC_res.get_mass_conservation_residual_fused(bed_c, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
+        """
+        print(f"mc_res stats: min={float(cp.nanmin(mc_res)):.3e}, "
+          f"max={float(cp.nanmax(mc_res)):.3e}, "
+          f"has_inf={bool(cp.any(cp.isinf(mc_res)))}, "
+          f"has_nan={bool(cp.any(cp.isnan(mc_res)))}")
+        print(f"mc_res^2 sum = {float(cp.nansum(cp.square(mc_res[self.mc_region_mask == 1]))):.3e}")
+        print(f"sigma_mc = {self.sigma_mc}")
+        """
         
         data_diff = bed_c - cond_bed_c
         loss_prev, loss_prev_mc, loss_prev_data = self.loss(mc_res,data_diff)
-    
+        # sync to floats instead of CuPy floats
+        loss_prev = float(loss_prev)       
+        loss_prev_mc = float(loss_prev_mc)
+        loss_prev_data = float(loss_prev_data)
+
         loss_cache[0] = loss_prev
         loss_mc_cache[0] = loss_prev_mc
         loss_data_cache[0] = loss_prev_data
         step_cache[0] = False
+        sim_mask = cp.full(self.xx.shape, False)
+
+        
         if not only_save_last_bed:
             bed_cache[0] = bed_c
     
@@ -513,6 +596,20 @@ class chain_sgs_gpu(chain):
                 'sill' :  self.vario_param[4],
                 'vtype' : self.vario_param[5],
             }
+            
+        # SGS MCMC
+        sgs_ctx = sgs_cxt.SGS_MCMC(
+            self.xx, 
+            self.yy, 
+            vario,
+            radius = rad, 
+            num_points = neighbors,
+            ktype=  'ok', 
+            seed = rng,
+            max_memory_gb = 1500.0,
+            dtype = cp.float64, 
+            quiet = False,
+        )
 
         # plotting for real-time result update
         if plot:
@@ -547,96 +644,164 @@ class chain_sgs_gpu(chain):
             seed = getattr(self, 'seed', 'Unknown')
             tqdm_position = getattr(self, 'tqdm_position', 0)
 
-            iterator = tqdm(range(1,n_iter),
+            iterator = tqdm(range(1, n_iter),
                             desc=f'Chain {chain_id} | Seed {seed}',
                             position=tqdm_position,
-                            leave=True) 
+                            leave=True)
         else:
-            iterator = range(1,n_iter)
-
+            iterator = range(1, n_iter)
             chain_id = getattr(self, 'chain_id', 'Unknown')
-            output_line = getattr(self, 'tqdm_position', 0) + 2 # Reserve first line for header
+            output_line = getattr(self, 'tqdm_position', 0) + 2 
             seed = getattr(self, 'seed', 'Unknown')
 
-        iter_start_time = time.time()        
-        for i in range(n_iter):
-    
-            while True:
-                indexx = rng.integers(low=0, high=bed_c.shape[0], size=1)[0]
-                indexy = rng.integers(low=0, high=bed_c.shape[1], size=1)[0]
-                if self.region_mask[indexx,indexy] == 1:
-                    break
-    
-            block_size_x = rng.integers(low=self.block_min_x, high=self.block_max_x, size=1)[0]
-            block_size_y = rng.integers(low=self.block_min_y, high=self.block_max_y, size=1)[0]
-    
-            blocks_cache[i,:]=[indexx,indexy,block_size_x,block_size_y]
+        iter_start_time = time.time()   
+        
+        # Transform once
+        #bed_tosim = nst_trans.transform(bed_c.reshape(-1,1)).reshape(self.xx.shape)
+        
+        valid_indices = cp.argwhere(self.region_mask == 1)  # (N, 2) on GPU
+        n_valid = valid_indices.shape[0]
+
+        # Pre-generate enough random indices for all iterations
+        """
+        print("HERE", n_valid)
+        print(type(n_valid))
+        """
+        rand_idx = rng.integers(0, int(n_valid), size=n_iter)
+        rand_block_x = rng.integers(self.block_min_x, self.block_max_x, size=n_iter)
+        rand_block_y = rng.integers(self.block_min_y, self.block_max_y, size=n_iter)
+
+        # Pull to CPU once
+        rand_idx_cpu = rand_idx.get()
+        valid_indices_cpu = valid_indices.get()
+        rand_bx_cpu = rand_block_x.get()
+        rand_by_cpu = rand_block_y.get()
+
+        for i in iterator:
+            
+            idx = valid_indices_cpu[rand_idx_cpu[i]]
+            indexx, indexy = int(idx[0]), int(idx[1])
+            block_size_x = int(rand_bx_cpu[i])
+            block_size_y = int(rand_by_cpu[i])
+            
+            blocks_cache[i,:] = cp.array([indexx,indexy,block_size_x,block_size_y])
     
             #find the index of the block side, make sure the block is within the edge of the map
-            bxmin = cp.max((0,int(indexx-block_size_x/2)))
-            bxmax = cp.min((bed_c.shape[0],int(indexx+block_size_x/2)))
-            bymin = cp.max((0,int(indexy-block_size_y/2)))
-            bymax = cp.min((bed_c.shape[1],int(indexy+block_size_y/2)))
-    
-            if self.do_transform == True:
-                bed_tosim = nst_trans.transform(bed_c.reshape(-1,1)).reshape(self.xx.shape)
-            else:
-                bed_tosim = bed_c.copy()
-    
-            bed_tosim[bxmin:bxmax,bymin:bymax] = z_cond_bed[bxmin:bxmax,bymin:bymax].copy()
-            sim_mask = np.full(self.xx.shape, False)
-            sim_mask[bxmin:bxmax,bymin:bymax] = True
-            newsim = sgs(self.xx, self.yy, bed_tosim, vario, rad, neighbors, sim_mask = sim_mask, seed=rng)
-    
-            if self.do_transform == True:
-                bed_next = nst_trans.inverse_transform(newsim.reshape(-1,1)).reshape(rows,cols)
-            else:
-                bed_next = newsim.copy()
+            bxmin = max( (0,int(indexx-block_size_x/2)) )
+            bxmax = min((bed_c.shape[0],int(indexx+block_size_x/2)))
+            bymin = max((0,int(indexy-block_size_y/2)))
+            bymax = min((bed_c.shape[1],int(indexy+block_size_y/2)))
             
-            if self.detrend_map == True:
-                #mc_res = Topography.get_mass_conservation_residual(bed_next + self.trend, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
-                mc_res = get_mass_conservation_residual_GPU(bed_next + self.trend, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
+            # Backup normal space block (if rejected we revert to this)
+            z_bed_backup = z_bed_c[bxmin:bxmax, bymin:bymax].copy()
+            bed_block_backup = bed_c[bxmin:bxmax, bymin:bymax].copy()
 
-            else:
-                mc_res = get_mass_conservation_residual_GPU(bed_next, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
             
-            data_diff = bed_next - cond_bed_c
-            loss_next, loss_next_mc, loss_next_data = self.loss(mc_res,data_diff)
+            # For the proposal, overlay the fixed conditioning data onto the normal space grid
+            z_bed_c[bxmin:bxmax,bymin:bymax] = z_cond_bed[bxmin:bxmax,bymin:bymax]
+            
+            # Boolean mask for blocks to change
+            sim_mask[:] = False                              
+            sim_mask[bxmin:bxmax, bymin:bymax] = True
+
+            ######
+            # Pass normal space to SGS
+        
+            newsim_z = sgs_ctx.simulate(z_bed_c, sim_mask)
+            if self.do_transform:
+                bed_c[bxmin:bxmax, bymin:bymax] = nst_trans.inverse_transform(
+                    newsim_z[bxmin:bxmax, bymin:bymax].reshape(-1, 1)
+                ).reshape(bxmax - bxmin, bymax - bymin)
+            else:
+                bed_c[bxmin:bxmax, bymin:bymax] = newsim_z[bxmin:bxmax, bymin:bymax]
+                
+            # GET MCR on the pertubated blocks only
+            
+            pxmin = max(0, bxmin - 1)
+            pxmax = min(bed_c.shape[0], bxmax + 1)
+            pymin = max(0, bymin - 1)
+            pymax = min(bed_c.shape[1], bymax + 1)
+
+            local_surf = self.surf[pxmin:pxmax, pymin:pymax]
+            local_velx = self.velx[pxmin:pxmax, pymin:pymax]
+            local_vely = self.vely[pxmin:pxmax, pymin:pymax]
+            local_dhdt = self.dhdt[pxmin:pxmax, pymin:pymax]
+            local_smb  = self.smb[pxmin:pxmax, pymin:pymax]
+
             
             if self.detrend_map == True:
-                block_thickness = self.surf[bxmin:bxmax,bymin:bymax] - (bed_next[bxmin:bxmax,bymin:bymax] + self.trend[bxmin:bxmax,bymin:bymax])
+                new_local_bed = bed_c[pxmin:pxmax, pymin:pymax] + self.trend[pxmin:pxmax, pymin:pymax]
             else:
-                block_thickness = self.surf[bxmin:bxmax,bymin:bymax] - bed_next[bxmin:bxmax,bymin:bymax]
+                new_local_bed = bed_c[pxmin:pxmax, pymin:pymax]
+            local_mc_res_pad = MC_res.get_mass_conservation_residual_fused_local(
+                new_local_bed, local_surf, local_velx, local_vely, local_dhdt, local_smb, resolution
+            )
+            dx_min = bxmin - pxmin
+            dx_max = dx_min + (bxmax - bxmin)
+            dy_min = bymin - pymin
+            dy_max = dy_min + (bymax - bymin)
+
+            local_mc_res = local_mc_res_pad[dx_min:dx_max, dy_min:dy_max]
+
+            # LOCAL LOSSES
+            mc_res_block_backup = mc_res[bxmin:bxmax, bymin:bymax].copy()
+            
+            mc_res[bxmin:bxmax, bymin:bymax] = local_mc_res
+
+                
+            #data_diff = bed_next - cond_bed_c
+            loss_next, loss_next_mc, loss_next_data = self.loss(mc_res, None)
+
+
+            if self.detrend_map == True:
+                block_thickness = self.surf[bxmin:bxmax,bymin:bymax] - (bed_c[bxmin:bxmax,bymin:bymax] + self.trend[bxmin:bxmax,bymin:bymax])
+            else:
+                block_thickness = self.surf[bxmin:bxmax,bymin:bymax] - bed_c[bxmin:bxmax,bymin:bymax]
                 
             block_region_mask = self.grounded_ice_mask[bxmin:bxmax,bymin:bymax]
                 
             if cp.sum((block_thickness<=0)&(block_region_mask==1)) > 0:
                 loss_next = cp.inf
-
-            if loss_prev > loss_next:
-                acceptance_rate = 1
                 
+            loss_next_val      = float(loss_next)
+            loss_next_mc_val   = float(loss_next_mc)
+            loss_next_data_val = float(loss_next_data)
+
+            if not math.isfinite(loss_next_val):
+                acceptance_rate = 0.0
+            elif loss_prev > loss_next_val:
+                acceptance_rate = 1.0
             else:
-                acceptance_rate = min(1 , cp.exp(loss_prev-loss_next))
+                acceptance_rate = min(1.0, math.exp(loss_prev - loss_next_val))
     
             u = rng.random()
-            
+            # ACCEPTED
             if (u <= acceptance_rate):
-                bed_c               = bed_next
-                loss_cache[i]       = loss_next
-                loss_mc_cache[i]    = loss_next_mc
-                loss_data_cache[i]  = loss_next_data
+                z_bed_c[bxmin:bxmax, bymin:bymax] = newsim_z[bxmin:bxmax, bymin:bymax]
+    
+                loss_cache[i]       = loss_next_val
+                loss_mc_cache[i]    = loss_next_mc_val
+                loss_data_cache[i]  = loss_next_data_val
                 step_cache[i]       = True
                 
-                loss_prev       = loss_next
-                loss_prev_mc    = loss_next_mc
-                loss_prev_data  = loss_next_data
+                loss_prev       = loss_next_val
+                loss_prev_mc    = loss_next_mc_val
+                loss_prev_data  = loss_next_data_val
+                # Update global mass residual
+                
                 resampled_times[bxmin:bxmax,bymin:bymax] += 1
+                accepted_count += 1
+            # REJECTED
             else:
+                # Restore
+                z_bed_c[bxmin:bxmax, bymin:bymax] = z_bed_backup
+                bed_c[bxmin:bxmax, bymin:bymax] = bed_block_backup
+
                 loss_cache[i]       = loss_prev
                 loss_mc_cache[i]    = loss_prev_mc
                 loss_data_cache[i]  = loss_prev_data
                 step_cache[i]       = False
+                mc_res[bxmin:bxmax, bymin:bymax] = mc_res_block_backup
     
             if not only_save_last_bed:
                 if self.detrend_map == True:
@@ -649,26 +814,26 @@ class chain_sgs_gpu(chain):
 
             if progress_bar:
                 # Update tqdm progress bar
+                # Use float() to safely pull CuPy 0-dim arrays to CPU without formatting errors
+                # Use accepted_count instead of cp.sum() to prevent GPU syncing
                 iterator.set_postfix({
                     'chain_id'  :   chain_id,
                     'seed'      :   seed,
-                    'mc loss'   :   f'{loss_mc_cache[i]:.3e}',
-                    'data loss' :   f'{loss_data_cache[i]:.3e}',
-                    'loss'      :   f'{loss_cache[i]:.3e}',
-                    'acceptance rate'   :   f'{np.sum(step_cache)/(i+1):.6f}'
+                    'mc loss'   :   f'{float(loss_mc_cache[i]):.3e}',
+                    'data loss' :   f'{float(loss_data_cache[i]):.3e}',
+                    'loss'      :   f'{float(loss_cache[i]):.3e}',
+                    'acc rate'  :   f'{accepted_count / i:.4f}'  # i is the total steps taken so far
                 })
             else:
-                if i%info_per_iter == 0 or i == 1 or i == n_iter - 1:
+                if i % info_per_iter == 0 or i == 1 or i == n_iter - 1:
                     move_cursor_to_line(output_line)
                     clear_line()
                     
-                    # Calculate progress
                     progress = i / (n_iter - 1)
                     progress_pct = progress * 100
                     elapsed = time.time() - iter_start_time
                     iter_per_sec = i / elapsed if elapsed > 0 else 0
                     
-                    # Calculate ETA
                     if iter_per_sec > 0:
                         remaining_iters = n_iter - i
                         eta_seconds = remaining_iters / iter_per_sec
@@ -679,18 +844,16 @@ class chain_sgs_gpu(chain):
                     else:
                         eta_str = "--:--:--"
                     
-                    # Create visual progress bar
                     bar_length = 10
                     filled_length = int(bar_length * progress)
                     bar = '█' * filled_length + '▍' * (1 if filled_length < bar_length and progress > 0 else 0)
                     bar = bar.ljust(bar_length)
                     
-                    # Format output
-                    print(f'Chain {chain_id} ({str(seed)[:6]}): {progress_pct:3.0f}%|{bar}| ETA: {eta_str} | it/s: {iter_per_sec:6.2f} | n: {n_iter:{len(str(n_iter))}d} | loss: {loss_cache[i]:.3e} | acc: {np.sum(step_cache)/(i+1):.4f}', end='')
+                    print(f'Chain {chain_id} ({str(seed)[:6]}): {progress_pct:3.0f}%|{bar}| ETA: {eta_str} | it/s: {iter_per_sec:6.2f} | n: {n_iter:{len(str(n_iter))}d} | loss: {float(loss_cache[i]):.3e} | acc: {accepted_count / i:.4f}', end='')
                     sys.stdout.flush()
 
             # Calculate acceptance rate for plot
-            total_acceptance = (accepted_count / (i + 1)) * 100
+            total_acceptance = (accepted_count / i) * 100
             acceptance_rates.append(total_acceptance)
 
             if plot:
@@ -701,7 +864,7 @@ class chain_sgs_gpu(chain):
 
                 if i % update_interval == 0:
                     # Update loss line
-                    line_loss.set_data(range(i + 1), loss_cache[:i + 1])
+                    line_loss.set_data(range(i + 1), loss_cache[:i + 1].get())
                     ax_loss.relim()
                     ax_loss.autoscale_view()
 
@@ -728,5 +891,4 @@ class chain_sgs_gpu(chain):
                 return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache, sample_values
             else:
                 return last_bed, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
-
 

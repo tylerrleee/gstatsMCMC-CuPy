@@ -1,0 +1,23 @@
+[
+  {
+    "label": "CPU (MCMC.chain_sgs)",
+    "elapsed_s": 47.03220133436844,
+    "iter_per_s": 10.60975216644515,
+    "final_loss": 965.7532128234402,
+    "acc_rate": 0.18637274549098196
+  },
+  {
+    "label": "GPU v1 (old sgs_gpu)",
+    "elapsed_s": 33.659832935314626,
+    "iter_per_s": 14.824791345784371,
+    "final_loss": 969.532695754061,
+    "acc_rate": 0.21042084168336672
+  },
+  {
+    "label": "GPU v2 (SGS_MCMC ctx)",
+    "elapsed_s": 33.07317402632907,
+    "iter_per_s": 15.087756609110253,
+    "final_loss": 969.532695754061,
+    "acc_rate": 0.21042084168336672
+  }
+]

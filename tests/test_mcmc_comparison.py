@@ -30,19 +30,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from sklearn.preprocessing import QuantileTransformer
 from GPU import MCMC_cu, QuantileTransformer_gpu
 
-from gstatsMCMC import MCMC as MCMC
+from gstatsMCMC import MCMC
     
-# ─────────────────────────────────────────────────────────────
-#  CONFIG — adjust these to your environment
-# ─────────────────────────────────────────────────────────────
-DATA_CSV        = '../Supprt_Force (1).csv'
-INITIAL_BED_NPY = '../bed_1000k.npy'
+DATA_CSV        = '../data/Supprt_Force (1).csv'
+INITIAL_BED_NPY = '../data/bed_1000k.npy'
 RNG_SEED        = 81978947
 RESOLUTION      = 500
 
 # Variogram params — use your saved values, or let the script compute them
 # Set to None to compute from data; set to a list to skip variogram fitting
-V1_P_OVERRIDE   = None  # e.g. [9932.54, 1.0219, 1.2259, 0]
+V1_P_OVERRIDE   = None  
 
 # Test iterations — keep small for benchmarking, increase for validation
 N_ITER_BENCHMARK = 500    # quick timing comparison
@@ -62,10 +59,6 @@ SGS_NEIGHBORS = 48
 SGS_RADIUS    = 30e3
 SIGMA_MC      = 5
 
-
-# ─────────────────────────────────────────────────────────────
-#  DATA LOADING  (identical to notebook cells 2–11)
-# ─────────────────────────────────────────────────────────────
 def load_data():
     """Load and prepare all data arrays. Returns a dict."""
     
@@ -111,10 +104,6 @@ def load_data():
         'rows': xx.shape[0], 'cols': xx.shape[1],
     }
 
-
-# ─────────────────────────────────────────────────────────────
-#  VARIOGRAM + NORMAL SCORE TRANSFORM  (notebook cells 14–19)
-# ─────────────────────────────────────────────────────────────
 def fit_variogram_and_transform(data_dict):
     """
     Fit variogram and normal score transform.
@@ -162,9 +151,6 @@ def fit_variogram_and_transform(data_dict):
     return V1_p, sklearn_qt
 
 
-# ─────────────────────────────────────────────────────────────
-#  CHAIN BUILDER HELPERS
-# ─────────────────────────────────────────────────────────────
 def configure_chain(chain_obj, data_dict, V1_p, nst_trans_obj):
     """Apply all the set_*() calls matching the notebook."""
     chain_obj.set_update_region(True, data_dict['highvel_mask'])
@@ -231,9 +217,6 @@ def run_chain(chain_obj, n_iter, label):
     }
 
 
-# ─────────────────────────────────────────────────────────────
-#  COMPARISON + REPORTING
-# ─────────────────────────────────────────────────────────────
 def compare_results(results):
     """Print a comparison table and optionally save a plot."""
 
@@ -300,11 +283,7 @@ def compare_results(results):
     print(f"  Results saved to: mcmc_benchmark_results.json")
 
 
-# ─────────────────────────────────────────────────────────────
-#  MAIN
-# ─────────────────────────────────────────────────────────────
 def main():
-    # ── Load data ────────────────────────────────────────────
     data = load_data()
     V1_p, sklearn_qt = fit_variogram_and_transform(data)
 
@@ -313,11 +292,8 @@ def main():
 
     results = []
 
-    # ═════════════════════════════════════════════════════════
-    #  (A) CPU-only chain: MCMC.chain_sgs
-    # ═════════════════════════════════════════════════════════
+
     if RUN_CPU:
-        from gstatsMCMC import MCMC
 
         cpu_chain = MCMC.chain_sgs(
             data['xx'], data['yy'], data['initial_bed'],
@@ -329,17 +305,9 @@ def main():
         configure_chain(cpu_chain, data, V1_p, sklearn_qt)
         results.append(run_chain(cpu_chain, N_ITER_BENCHMARK, "CPU (MCMC.chain_sgs)"))
 
-    # ═════════════════════════════════════════════════════════
-    #  (B) GPU v1: old MCMC_cu with sgs_gpu (full preprocess)
-    #      To test this, you need the PREVIOUS version of
-    #      MCMC_cu.py (before SGS_MCMC integration).
-    #      If not available, skip this test.
-    # ═════════════════════════════════════════════════════════
+
     if RUN_GPU_V1:
         try:
-            # Try importing the old GPU module
-            # Rename your old MCMC_cu.py to MCMC_cu_v1.py to keep both
-
             nst_gpu = QuantileTransformer_gpu.NormalScoreTransformGPU(sklearn_qt)
 
             gpu_v1_chain = MCMC_cu.chain_sgs_gpu(
@@ -350,34 +318,9 @@ def main():
             )
             configure_chain(gpu_v1_chain, data, V1_p, nst_gpu)
             results.append(run_chain(gpu_v1_chain, N_ITER_BENCHMARK,
-                                     "GPU v1 (old sgs_gpu)"))
+                                     "GPU"))
         except ImportError:
-            print("\n  [SKIP] GPU v1 — MCMC_cu_v1 not found.")
-            print("         To enable: copy your old MCMC_cu.py → GPU/MCMC_cu_v1.py")
-
-    # ═════════════════════════════════════════════════════════
-    #  (C) GPU v2: new MCMC_cu with SGS_MCMC context
-    # ═════════════════════════════════════════════════════════
-    if RUN_GPU_V2:
-
-        nst_gpu = QuantileTransformer_gpu.NormalScoreTransformGPU(sklearn_qt)
-
-        gpu_v2_chain = MCMC_cu.chain_sgs_gpu(
-            data['xx'], data['yy'], data['initial_bed'],
-            data['bedmap_surf'], data['velx'], data['vely'],
-            data['dhdt'], data['smb'], data['cond_bed'],
-            data['data_mask'], data['grounded_ice_mask'], RESOLUTION
-        )
-        configure_chain(gpu_v2_chain, data, V1_p, nst_gpu)
-        results.append(run_chain(gpu_v2_chain, N_ITER_BENCHMARK,
-                                 "GPU v2 (SGS_MCMC ctx)"))
-
-    # ── Compare ──────────────────────────────────────────────
-    if results:
-        compare_results(results)
-    else:
-        print("\n  No tests were run. Check RUN_CPU / RUN_GPU_V1 / RUN_GPU_V2 flags.")
-
+            print("\n  GPU — MCMC_cu not found.")
 
 if __name__ == '__main__':
     main()

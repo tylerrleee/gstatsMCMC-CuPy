@@ -17,7 +17,7 @@ class SGS_MCMC:
     
     def __init__(self, xx, yy, variogram, radius=100e3, num_points=32,
                  ktype='ok', seed=None, max_memory_gb=150.0,
-                 batch_size=None, dtype=cp.float32, quiet=False):
+                 batch_size=None, dtype=cp.float32, quiet=True):
         """
         One-time setup.  Call this ONCE before the MCMC loop.
  
@@ -74,8 +74,9 @@ class SGS_MCMC:
             avail_mem = max_memory_gb * (1024 ** 3) * 0.8
             calc_batch = int(avail_mem // mem_per_point)
             self.batch_size = max(4096, min(calc_batch, 200_000))
+            
             if not quiet:
-                print(f"[SGSContext] batch_size={self.batch_size}  "
+                print(f"[SGS_GPU] batch_size={self.batch_size}  "
                       f"(stencil ~{stencil_pixels} px)")
         else:
             self.batch_size = batch_size

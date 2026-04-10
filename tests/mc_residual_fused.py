@@ -1,5 +1,5 @@
 """
-mc_residual_fused.py — Single CUDA kernel for mass conservation residual.
+Single CUDA kernel for mass conservation residual.
 
 Replaces 6+ kernel launches with 1:
     thick = surf - bed
@@ -18,6 +18,9 @@ Usage:
 """
 
 import cupy as cp
+import matplotlib.pyplot as plt
+import time
+import numpy as np
 
 # ── Raw CUDA kernel ──────────────────────────────────────────
 _mc_residual_kernel = cp.RawKernel(r'''
@@ -131,7 +134,6 @@ def get_mass_conservation_residual_fused(bed, surf, velx, vely, dhdt, smb, resol
     return res
 
 
-# ── Also provide a local-block version ───────────────────────
 def get_mass_conservation_residual_fused_local(
     bed_local, surf_local, velx_local, vely_local,
     dhdt_local, smb_local, resolution
@@ -154,10 +156,11 @@ def get_mass_conservation_residual_fused_local(
     )
 
 
-# ── Verification ─────────────────────────────────────────────
+# ── Verification & Plotting ──────────────────────────────────
 if __name__ == '__main__':
     import numpy as np
     import time
+    import matplotlib.pyplot as plt
 
     print("=" * 60)
     print("  Fused MC Residual Kernel — Verification & Benchmark")
@@ -170,11 +173,16 @@ if __name__ == '__main__':
         dy = cp.gradient(vely * thick, resolution, axis=0)
         return dx + dy + dhdt - smb
 
-    # ── Test on multiple grid sizes ──────────────────────────
-    for shape_label, shape in [("Small block (22x22)", (22, 22)),
-                                ("Medium grid (100x150)", (100, 150)),
-                                ("Full grid (200x300)", (200, 300))]:
-        print(f"\n--- {shape_label} ---")
+    # Lists to store benchmarking data for plotting
+    grid_labels = []
+    ref_times_us = []
+    fused_times_us = []
+
+    # Test multiple grid sizes
+    for shape_label, shape in [("SmallScale block\n(15x15)", (15, 15)),
+                                ("LargeScale grid\n(50x50)", (50, 50)),
+                                ("Full grid\n(2000x2000)", (2000, 2000))]:
+        print(f"\n--- {shape_label.replace(chr(10), ' ')} ---")
         rows, cols = shape
         rng = np.random.default_rng(42)
 
@@ -221,13 +229,21 @@ if __name__ == '__main__':
         t_fused = (time.perf_counter() - t0) / n_bench
 
         speedup = t_ref / t_fused
-        print(f"  Reference (6 kernels): {t_ref*1e6:8.1f} µs")
-        print(f"  Fused (1 kernel):      {t_fused*1e6:8.1f} µs")
+        t_ref_us = t_ref * 1e6
+        t_fused_us = t_fused * 1e6
+        
+        print(f"  Reference (6 kernels): {t_ref_us:8.1f} µs")
+        print(f"  Fused (1 kernel):      {t_fused_us:8.1f} µs")
         print(f"  Speedup: {speedup:.2f}x")
 
-    # ── Test local block version ─────────────────────────────
-    print(f"\n--- Local block version (slice from 200x300 grid) ---")
-    rows, cols = 200, 300
+        # Store data for plotting
+        grid_labels.append(shape_label)
+        ref_times_us.append(t_ref_us)
+        fused_times_us.append(t_fused_us)
+
+    # Local block version verification
+    print(f"\n--- Local block version (slice from 500x500 grid) ---")
+    rows, cols = 500, 500
     rng = np.random.default_rng(99)
     bed  = cp.asarray(rng.uniform(-2000, 500, (rows, cols)))
     surf = bed + cp.asarray(rng.uniform(100, 3000, (rows, cols)))
@@ -236,35 +252,62 @@ if __name__ == '__main__':
     dhdt = cp.asarray(rng.uniform(-10, 10, (rows, cols)))
     smb  = cp.asarray(rng.uniform(-5, 5, (rows, cols)))
 
-    # Extract a block with 1-cell padding (like the MCMC loop does)
     bxmin, bxmax, bymin, bymax = 50, 65, 80, 100
     pad_x1, pad_x2 = max(0, bxmin-1), min(rows, bxmax+1)
     pad_y1, pad_y2 = max(0, bymin-1), min(cols, bymax+1)
 
     ref_local = get_mass_conservation_residual_GPU_reference(
-        bed[pad_x1:pad_x2, pad_y1:pad_y2],
-        surf[pad_x1:pad_x2, pad_y1:pad_y2],
-        velx[pad_x1:pad_x2, pad_y1:pad_y2],
-        vely[pad_x1:pad_x2, pad_y1:pad_y2],
-        dhdt[pad_x1:pad_x2, pad_y1:pad_y2],
-        smb[pad_x1:pad_x2, pad_y1:pad_y2],
-        500.0
+        bed[pad_x1:pad_x2, pad_y1:pad_y2], surf[pad_x1:pad_x2, pad_y1:pad_y2],
+        velx[pad_x1:pad_x2, pad_y1:pad_y2], vely[pad_x1:pad_x2, pad_y1:pad_y2],
+        dhdt[pad_x1:pad_x2, pad_y1:pad_y2], smb[pad_x1:pad_x2, pad_y1:pad_y2], 500.0
     )
     fused_local = get_mass_conservation_residual_fused_local(
-        bed[pad_x1:pad_x2, pad_y1:pad_y2],
-        surf[pad_x1:pad_x2, pad_y1:pad_y2],
-        velx[pad_x1:pad_x2, pad_y1:pad_y2],
-        vely[pad_x1:pad_x2, pad_y1:pad_y2],
-        dhdt[pad_x1:pad_x2, pad_y1:pad_y2],
-        smb[pad_x1:pad_x2, pad_y1:pad_y2],
-        500.0
+        bed[pad_x1:pad_x2, pad_y1:pad_y2], surf[pad_x1:pad_x2, pad_y1:pad_y2],
+        velx[pad_x1:pad_x2, pad_y1:pad_y2], vely[pad_x1:pad_x2, pad_y1:pad_y2],
+        dhdt[pad_x1:pad_x2, pad_y1:pad_y2], smb[pad_x1:pad_x2, pad_y1:pad_y2], 500.0
     )
     max_err = float(cp.max(cp.abs(ref_local - fused_local)))
-    print(f"  Block shape: {ref_local.shape}")
-    print(f"  Max absolute error: {max_err:.2e}")
     assert max_err < 1e-10, f"FAILED: max error {max_err} too large"
     print(f"  ✓ Local block version verified")
 
     print(f"\n{'='*60}")
-    print(f"  All tests passed")
+    print(f"  All tests passed. Generating plot...")
     print(f"{'='*60}")
+
+    # ── Matplotlib Chart Generation ──────────────────────────────
+    x = np.arange(len(grid_labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Create grouped bars
+    rects1 = ax.bar(x - width/2, ref_times_us, width, label='Reference (6 kernels)', color='#E24A33')
+    rects2 = ax.bar(x + width/2, fused_times_us, width, label='Fused (1 kernel)', color='#348ABD')
+
+    # Formatting and labels
+    ax.set_ylabel('Execution Time (µs)')
+    ax.set_title('GPU Performance: Reference vs. Fused Kernel')
+    ax.set_xticks(x)
+    ax.set_xticklabels(grid_labels)
+    ax.legend()
+    
+    # Using a log scale if the difference between small and full grid times is massive
+    ax.set_yscale('log')
+
+    # Add exact values on top of the bars
+    ax.bar_label(rects1, padding=3, fmt='%.1f')
+    ax.bar_label(rects2, padding=3, fmt='%.1f')
+
+    # Calculate and annotate speedup percentages
+    for i in range(len(grid_labels)):
+        speedup_val = ref_times_us[i] / fused_times_us[i]
+        ax.text(x[i], max(ref_times_us[i], fused_times_us[i]) * 1.5, 
+                f'{speedup_val:.2f}x Speedup', ha='center', va='bottom', 
+                fontweight='bold', color='black')
+
+    # Ensure layout fits well and display
+    fig.tight_layout()
+    
+    # Save the plot to disk before showing it
+    plt.savefig(f'kernel_performance_{time.time()}.png', dpi=50)
+    plt.show()

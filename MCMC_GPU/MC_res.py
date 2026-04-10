@@ -92,6 +92,13 @@ def get_mass_conservation_residual_fused(bed, surf, velx, vely, dhdt, smb, resol
     resolution is a Python float or int.
     Returns a 2D CuPy float64 array of the same shape.
     """
+    bed  = cp.asarray(bed, dtype=cp.float64)
+    surf = cp.asarray(surf, dtype=cp.float64)
+    velx = cp.asarray(velx, dtype=cp.float64)
+    vely = cp.asarray(vely, dtype=cp.float64)
+    dhdt = cp.asarray(dhdt, dtype=cp.float64)
+    smb  = cp.asarray(smb, dtype=cp.float64)
+    
     rows, cols = bed.shape
     n = rows * cols
  
@@ -113,7 +120,6 @@ def get_mass_conservation_residual_fused(bed, surf, velx, vely, dhdt, smb, resol
     return res
  
  
-# ── Also provide a local-block version ───────────────────────
 def get_mass_conservation_residual_fused_local(
     bed_local, surf_local, velx_local, vely_local,
     dhdt_local, smb_local, resolution
@@ -122,6 +128,13 @@ def get_mass_conservation_residual_fused_local(
     Same as above but for small local blocks extracted from the full grid.
     Ensures contiguous memory layout before launching the kernel.
     """
+    bed_local  = cp.asarray(bed_local, dtype=cp.float64)
+    surf_local = cp.asarray(surf_local, dtype=cp.float64)
+    velx_local = cp.asarray(velx_local, dtype=cp.float64)
+    vely_local = cp.asarray(vely_local, dtype=cp.float64)
+    dhdt_local = cp.asarray(dhdt_local, dtype=cp.float64)
+    smb_local  = cp.asarray(smb_local, dtype=cp.float64)
+    
     # Slices from CuPy arrays may not be contiguous
     bed_local  = cp.ascontiguousarray(bed_local)
     surf_local = cp.ascontiguousarray(surf_local)
