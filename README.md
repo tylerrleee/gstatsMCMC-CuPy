@@ -68,8 +68,6 @@ git clone https://github.com/tylerrleee/gstatsMCMC-CuPy
 cd gstatsMCMC-CuPy
 ```
 
-> **Note:** You also need the base [gstatsMCMC](https://github.com/your-org/gstatsMCMC) library installed, as this project imports its `Topography` module.
-
 ## Quick Start
 
 ```python
