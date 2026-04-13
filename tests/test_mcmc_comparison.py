@@ -1,11 +1,6 @@
 """
-test_mcmc_comparison.py
-=======================
-Benchmarking harness that runs the same MCMC workflow three ways:
-
-  A) CPU-only:   MCMC.chain_sgs          (original NumPy/sklearn)
-  B) GPU v1:     MCMC_cu.chain_sgs_gpu   (old sgs_gpu — full preprocess every iter)
-  C) GPU v2:     MCMC_cu.chain_sgs_gpu   (with SGS_MCMC context — no redundant setup)
+CPU-only:   MCMC.chain_sgs          (original NumPy/sklearn)
+GPU:     MCMC_cu.chain_sgs_gpu   
 
 Replicates the T4_GPU_SmallScaleChain notebook workflow exactly.
 Run on a machine with the project code, data files, and a CUDA GPU.
@@ -23,27 +18,28 @@ import time
 import json
 import os
 import sys
-import os 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from sklearn.preprocessing import QuantileTransformer
 from GPU import MCMC_cu, QuantileTransformer_gpu
-
 from gstatsMCMC import MCMC
-    
-DATA_CSV        = '../data/Supprt_Force (1).csv'
-INITIAL_BED_NPY = '../data/bed_1000k.npy'
-RNG_SEED        = 81978947
+
+#DATA_CSV        = '../data/Supprt_Force (1).csv'
+#INITIAL_BED_NPY = '../data/bed_910k.npy'
+DATA_CSV        = '../data/BindSchadler_Macayeal_IceStreams.csv'
+INITIAL_BED_NPY = '../data/bed_29910k.npy'
+
+RNG_SEED        = 0
 RESOLUTION      = 500
 
 # Variogram params — use your saved values, or let the script compute them
 # Set to None to compute from data; set to a list to skip variogram fitting
-V1_P_OVERRIDE   = None  
+V1_P_OVERRIDE   = None
 
 # Test iterations — keep small for benchmarking, increase for validation
 N_ITER_BENCHMARK = 500    # quick timing comparison
-N_ITER_VALIDATE  = 2000   # longer run to compare loss trajectories
+N_ITER_VALIDATE  = 5000   # longer run to compare loss trajectories
 
 # Which tests to run
 RUN_CPU      = True   # (A) original CPU chain — can be very slow
@@ -59,9 +55,11 @@ SGS_NEIGHBORS = 48
 SGS_RADIUS    = 30e3
 SIGMA_MC      = 5
 
+bed_size = None
+
 def load_data():
     """Load and prepare all data arrays. Returns a dict."""
-    
+
     print("Loading data...")
     df = pd.read_csv(DATA_CSV)
 
@@ -79,7 +77,7 @@ def load_data():
     bedmap_surf          = df['bedmap_surf'].values.reshape(xx.shape)
     highvel_mask         = df['highvel_mask'].values.reshape(xx.shape)
     bedmap_bed           = df['bedmap_bed'].values.reshape(xx.shape)
-
+    bed_size = xx.shape
     # Conditioning data
     cond_bed = np.where(bedmap_mask == 1,
                         df['bed'].values.reshape(xx.shape),
@@ -103,6 +101,7 @@ def load_data():
         'grounded_ice_mask': grounded_ice_mask,
         'rows': xx.shape[0], 'cols': xx.shape[1],
     }
+
 
 def fit_variogram_and_transform(data_dict):
     """
@@ -165,7 +164,7 @@ def configure_chain(chain_obj, data_dict, V1_p, nst_trans_obj):
 
 
 def run_chain(chain_obj, n_iter, label):
-    """Run a chain, return timing + loss array."""
+    """Run a chain, return timing + loss array + final bed + per-iteration times."""
     print(f"\n{'='*60}")
     print(f"  Running: {label}  ({n_iter} iterations)")
     print(f"{'='*60}")
@@ -186,7 +185,12 @@ def run_chain(chain_obj, n_iter, label):
     loss_cache     = result[3]
     step_cache     = result[4]
 
-    # Pull to numpy for comparison
+    # Pull to numpy
+    if hasattr(last_bed, 'get'):
+        last_bed_np = last_bed.get()
+    else:
+        last_bed_np = np.asarray(last_bed)
+
     if hasattr(loss_cache, 'get'):
         loss_np    = loss_cache.get()
         step_np    = step_cache.get()
@@ -196,6 +200,9 @@ def run_chain(chain_obj, n_iter, label):
         step_np    = np.asarray(step_cache)
         loss_mc_np = np.asarray(loss_mc_cache)
 
+    # Read per-iteration times recorded inside run()
+    per_iter_times = np.asarray(getattr(chain_obj, 'iter_times', []))
+
     acc_rate = np.sum(step_np) / max(1, n_iter - 1)
 
     print(f"\n  {label} results:")
@@ -204,21 +211,26 @@ def run_chain(chain_obj, n_iter, label):
     print(f"    Final loss:      {loss_np[-1]:.6e}")
     print(f"    Final MC loss:   {loss_mc_np[-1]:.6e}")
     print(f"    Acceptance rate: {acc_rate:.4f}")
+    if len(per_iter_times) > 0:
+        print(f"    Median iter time: {np.median(per_iter_times):.4f} s")
+        print(f"    Min / Max iter:   {per_iter_times.min():.4f} / {per_iter_times.max():.4f} s")
 
     return {
-        'label':     label,
-        'elapsed':   elapsed,
-        'iter_per_s': (n_iter - 1) / elapsed,
-        'loss':      loss_np,
-        'loss_mc':   loss_mc_np,
-        'steps':     step_np,
-        'acc_rate':  acc_rate,
-        'final_loss': float(loss_np[-1]),
+        'label':            label,
+        'elapsed':          elapsed,
+        'iter_per_s':       (n_iter - 1) / elapsed,
+        'loss':             loss_np,
+        'loss_mc':          loss_mc_np,
+        'steps':            step_np,
+        'acc_rate':         acc_rate,
+        'final_loss':       float(loss_np[-1]),
+        'last_bed':         last_bed_np,
+        'per_iter_times':   per_iter_times,
     }
 
 
 def compare_results(results):
-    """Print a comparison table and optionally save a plot."""
+    """Plot loss traces, iteration speed, total time bar, and acceptance rate."""
 
     print("\n" + "=" * 70)
     print("  COMPARISON SUMMARY")
@@ -230,7 +242,6 @@ def compare_results(results):
         print(f"  {r['label']:<25} {r['elapsed']:>10.2f} {r['iter_per_s']:>10.2f} "
               f"{r['final_loss']:>14.6e} {r['acc_rate']:>10.4f}")
 
-    # Speedup relative to first result
     if len(results) > 1:
         base = results[0]['elapsed']
         print(f"\n  Speedups vs {results[0]['label']}:")
@@ -238,29 +249,58 @@ def compare_results(results):
             speedup = base / r['elapsed']
             print(f"    {r['label']}: {speedup:.2f}x")
 
-    # Save loss curves
+    # ---------- Plotting ----------
     try:
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-        # Loss trajectories
-        for r in results:
-            axes[0].plot(r['loss'], label=r['label'], alpha=0.8)
-        axes[0].set_xlabel('Iteration')
-        axes[0].set_ylabel('Loss')
-        axes[0].set_title('Loss Trajectory Comparison')
-        axes[0].legend()
-        axes[0].set_yscale('log')
-
-        # Bar chart of it/s
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         labels = [r['label'] for r in results]
-        speeds = [r['iter_per_s'] for r in results]
-        bars = axes[1].bar(labels, speeds, color=['#2196F3', '#FF9800', '#4CAF50'][:len(results)])
-        axes[1].set_ylabel('Iterations / second')
-        axes[1].set_title('Throughput Comparison')
-        for bar, speed in zip(bars, speeds):
-            axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                        f'{speed:.1f}', ha='center', va='bottom', fontsize=10)
+        colors = plt.cm.Set2(np.linspace(0, 0.5, len(results)))
+
+        # --- [1,1] Loss trace ---
+        for r, c in zip(results, colors):
+            axes[0, 0].plot(r['loss'], label=r['label'], alpha=0.8, color=c)
+        axes[0, 0].set_xlabel('Iteration')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].set_title(f'Loss Trajectory ({bed_size})')
+        axes[0, 0].legend()
+        axes[0, 0].set_yscale('log')
+
+        # --- [1,2] Per-iteration speed over time ---
+        has_timing = False
+        for r, c in zip(results, colors):
+            if len(r['per_iter_times']) > 0:
+                has_timing = True
+                iter_speed = 1.0 / np.where(r['per_iter_times'] > 0,
+                                            r['per_iter_times'], np.inf)
+                axes[0, 1].plot(iter_speed, label=r['label'], alpha=0.7, color=c)
+        if has_timing:
+            axes[0, 1].set_xlabel('Iteration')
+            axes[0, 1].set_ylabel('Speed (iterations / s)')
+            axes[0, 1].set_title('Per-Iteration Speed')
+            axes[0, 1].legend()
+        else:
+            axes[0, 1].text(0.5, 0.5, 'No per-iter timing data',
+                            ha='center', va='center', transform=axes[0, 1].transAxes,
+                            fontsize=12)
+            axes[0, 1].set_title('Per-Iteration Speed (N/A)')
+
+        # --- [2,1] Bar plot of total time ---
+        elapsed_vals = [r['elapsed'] for r in results]
+        bars = axes[1, 0].bar(labels, elapsed_vals, color=colors, edgecolor='gray', width=0.5)
+        for bar, val in zip(bars, elapsed_vals):
+            axes[1, 0].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                            f'{val:.1f}s', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        axes[1, 0].set_ylabel('Wall Time (s)')
+        axes[1, 0].set_title('Total Time to Complete')
+
+        # --- [2,2] Acceptance rate bar plot ---
+        acc_vals = [r['acc_rate'] for r in results]
+        bars = axes[1, 1].bar(labels, acc_vals, color=colors, edgecolor='gray', width=0.5)
+        for bar, val in zip(bars, acc_vals):
+            axes[1, 1].text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                            f'{val:.3f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        axes[1, 1].set_ylabel('Acceptance Rate')
+        axes[1, 1].set_title('Acceptance Rate')
+        axes[1, 1].set_ylim(0, min(1.0, max(acc_vals) * 1.3))
 
         plt.tight_layout()
         plt.savefig('mcmc_benchmark_comparison.png', dpi=150)
@@ -283,6 +323,7 @@ def compare_results(results):
     print(f"  Results saved to: mcmc_benchmark_results.json")
 
 
+
 def main():
     data = load_data()
     V1_p, sklearn_qt = fit_variogram_and_transform(data)
@@ -292,19 +333,16 @@ def main():
 
     results = []
 
-
     if RUN_CPU:
-
         cpu_chain = MCMC.chain_sgs(
             data['xx'], data['yy'], data['initial_bed'],
             data['bedmap_surf'], data['velx'], data['vely'],
             data['dhdt'], data['smb'], data['cond_bed'],
             data['data_mask'], data['grounded_ice_mask'], RESOLUTION
         )
-        # CPU chain uses sklearn QuantileTransformer directly
         configure_chain(cpu_chain, data, V1_p, sklearn_qt)
-        results.append(run_chain(cpu_chain, N_ITER_BENCHMARK, "CPU (MCMC.chain_sgs)"))
-
+        results.append(run_chain(cpu_chain, N_ITER_BENCHMARK,
+                                 "CPU"))
 
     if RUN_GPU_V1:
         try:
@@ -317,10 +355,12 @@ def main():
                 data['data_mask'], data['grounded_ice_mask'], RESOLUTION
             )
             configure_chain(gpu_v1_chain, data, V1_p, nst_gpu)
-            results.append(run_chain(gpu_v1_chain, N_ITER_BENCHMARK,
-                                     "GPU"))
+            results.append(run_chain(gpu_v1_chain, N_ITER_BENCHMARK, "GPU"))
         except ImportError:
             print("\n  GPU — MCMC_cu not found.")
+
+    compare_results(results)
+
 
 if __name__ == '__main__':
     main()

@@ -11,6 +11,15 @@ GPU-accelerated Markov Chain Monte Carlo (MCMC) framework for geostatistical inf
 - **Multi-GPU parallelism** : Run independent MCMC chains across multiple GPUs with per-device process and batch scheduling.
 - **Variogram models** : Supporting Matérn, Exponential, Gaussian, and Spherical covariance models with anisotropic rotation/scaling.
 
+## Benchmarks
+
+# **Running MCMC (Numpy-based) versus MCMC (CuPy + batch SGS + fused MCR)**
+
+Main bottleneck is that Sequential Gaussian Simulation suffers on large grids (this is ~1500x1500), so running SGS for N interations takes a longgggg time. Hence, utilizing GPU is necessary to speed up this process.
+
+![benchmark-bindshalder-macayeal](tests/mcmc_benchmark_comparison.png)
+
+
 ## Repository Structure
 
 ```

@@ -96,6 +96,7 @@ def msc_run_wrapper(shared_data, per_chain):
     4. Save chains
 
     '''
+    # We import this in process as part of the spawn context
     import cupy as cp
     import scipy as sp
     from MCMC_GPU import MCMC_cu, QuantileTransformer_gpu
@@ -143,14 +144,14 @@ def msc_run_wrapper(shared_data, per_chain):
     output_path   = per_chain['output_path']
     
     # 5. per_bed trend + normal score transformation on GPU
-    trend = sp.ndimage.gaussian_filter(initial_bed, sigma=10) # TODO adjust this 
+    trend = sp.ndimage.gaussian_filter(initial_bed, sigma = sigma_mc) # TODO adjust this 
     data_for_distribution = (initial_bed - trend).reshape((-1, 1)) # detrend
     
     sklearn_qt = QuantileTransformer(
-        n_quantiles=1000,
+        n_quantiles = 1000,
         output_distribution="normal",
-        subsample=None,
-        random_state=rng_seed_base,
+        subsample   = None,
+        random_state = rng_seed_base,
     ).fit(data_for_distribution)
     nst_trans = QuantileTransformer_gpu.NormalScoreTransformGPU(sklearn_qt)
     
@@ -160,7 +161,7 @@ def msc_run_wrapper(shared_data, per_chain):
         dhdt, smb, cond_bed, data_mask, grounded_ice_mask, resolution,
     )
     chain.set_update_region(True, highvel_mask)
-    chain.set_loss_type(sigma_mc=sigma_mc, massConvInRegion=True)
+    chain.set_loss_type(sigma_mc = sigma_mc, massConvInRegion=True)
     chain.set_block_sizes(min_block_x, max_block_x, min_block_y, max_block_y)
     chain.set_normal_transformation(nst_trans, do_transform=True)
     chain.set_trend(trend=trend, detrend_map=True)
@@ -225,7 +226,7 @@ def msc_run_wrapper(shared_data, per_chain):
     result = chain.run(
         n_iter=n_iter,
         only_save_last_bed=True,
-        info_per_iter=10,
+        info_per_iter = 10,
         plot=False,
         progress_bar=False,
     )
@@ -246,7 +247,7 @@ def msc_run_wrapper(shared_data, per_chain):
     resampled_times = _to_numpy(resampled_times)
     blocks_used     = _to_numpy(blocks_used)
     
-    # ---- Save CuPy RNG state (best-effort, won't block file saves) ----
+    # Save RNG serializable - since we can't save CuPy Generator as JSON since it on VRAM 
     try:
         bg = chain.rng.bit_generator
         raw_state = bg.state() if callable(bg.state) else bg.state
@@ -322,11 +323,17 @@ if __name__ == '__main__':
 
     A constaint is that a personal device might run out of memory on large sites b/c of all of the .copy()
     """
-    # FILE PATHS -- EDIT HERE
+    # FILE PATHS 
     glacier_data_path = Path(r'./data/Supprt_Force.csv')
     seed_file_path    = Path(r'./data/200_seeds.txt')
     output_path       = Path(r'./data/support_force')
- 
+    
+    # Number of SmallScaleChains per LargeScaleChain
+    n_ssc_per_lsc = 10
+
+    sigma_mc = 1.5
+
+    # Total iterations per chain
     n_iter = 100
     
     lsc_starting_idx = 0
@@ -373,10 +380,11 @@ if __name__ == '__main__':
     lsc_indices = range(lsc_starting_idx, lsc_ending_idx + 1)
     first_lsc_seed = rng_seeds[lsc_indices[0]]
     first_lsc_path = output_path / 'LargeScaleChain' / str(first_lsc_seed)[:6]
+
     # get LSC bed paths (latest) - just one!
     first_bed_files = sorted(
         first_lsc_path.glob('bed_*.npy'),
-        key=lambda f: int(f.stem.split('_')[1].replace('k', '')),
+        key=lambda f: int(f.stem.split('_')[1].replace('k', '')), # filter only the bed number
     )
 
     first_bed = np.load(first_bed_files[-1])
@@ -389,9 +397,9 @@ if __name__ == '__main__':
     data_for_dist_vario = (first_bed - trend_for_vario).reshape((-1, 1))
     
     sklearn_qt_vario = QuantileTransformer(
-        n_quantiles=1000,
-        output_distribution="normal",
-        subsample=None,
+        n_quantiles = 1000,
+        output_distribution = "normal",
+        subsample = None,
         random_state=rng_seed,
     ).fit(data_for_dist_vario)
     
@@ -401,7 +409,7 @@ if __name__ == '__main__':
     df['Nbed_residual'] = transformed_data
  
     # ADJUST SAMPLING if take too long
-    df_sampled = df.sample(frac=0.5, random_state=rng_seed)
+    df_sampled = df.sample(frac = 0.5, random_state=rng_seed)
     df_sampled = df_sampled[df_sampled['cond_bed_residual'].isnull() == False]
     df_sampled = df_sampled[df_sampled['bedmap_mask'] == 1]
     
@@ -435,7 +443,7 @@ if __name__ == '__main__':
         'highvel_mask':      np.array(highvel_mask, copy=True),
         'resolution':        int(resolution),
         'V1_p':              V1_p,          # list[float]
-        'sigma_mc':          1.50, # ADJUST THIS
+        'sigma_mc':          sigma_mc, # ADJUST THIS
         'min_block_x':       5,
         'max_block_x':       20,
         'min_block_y':       5,
@@ -445,7 +453,9 @@ if __name__ == '__main__':
         'rng_seed_base':     int(rng_seed),
     }
     
+
     # check if shared_data is pickable (unpackable)
+    # This will fail if we have a non numpy array or a non-int is inserted
     try:
         pickle.dumps(shared_data)
         print("AYYYY shared_data is picklable")
@@ -459,7 +469,6 @@ if __name__ == '__main__':
         sys.exit(1)
     
     # PER CHAIN DATA - ADJUST THIS
-    n_ssc_per_lsc = 10
     per_chain_data_all = []
     
     for lsc_idx in lsc_indices:
@@ -527,6 +536,7 @@ if __name__ == '__main__':
 
     
     # Batch runs : one chain per GPU 
+    # Once a chain finishes running, we move onto the next chain
     # check $nvidia-smi
     n_gpus = _get_n_gpus()
 
