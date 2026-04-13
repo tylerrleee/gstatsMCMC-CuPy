@@ -4,12 +4,20 @@ GPU-accelerated Markov Chain Monte Carlo (MCMC) framework for geostatistical inf
 
 ## Key Features
 
+- **SGS context**: Each MCMC proposal modifies a block of the spatial field  simulate() re-simulates just that block conditioned on everything else → the MCMC kernel accepts or rejects → repeat. The class avoids re-initializing GPU resources between proposals, which is where most of the performance gain comes from.
+  - Based on [gstatsim_custom](https://github.com/badger-lord/gstatsim_gpu)'s implementation of SGS on GPU, SGS works by visiting each unknown grid cell one at a time in a random order, and at each cell:
+    1. Finding nearby known values (neighbors)
+    2. Kriging (ordinary kriging or spatial kriging) - fitting a local estimate and uncertainty using the variogram 
+    3. Drawing a sample from that local Gaussian distribution
+    4. Treating the new value as known for all subsequent cells
+This produces a statistically plausible realization of the spatial field.
+
 - **Fused CUDA kernels for mass conservation** : Ice flux divergence and full mass balance residuals are computed in a single custom CUDA kernel.
+    - The mass conservation are asserted with a tolerance of 10e-5
 ![fused-kernel-performance](tests/kernel_performance_1775668061.672548.png)
 - **On-GPU normal score transformation** : Quantile-based forward/inverse transforms keep data GPU-resident throughout the chain, referencing [sk-learn QuantileTransformer](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.QuantileTransformer.html)
-- **Memory-aware batching** : SGS batch sizes auto-tune based on available VRAM to maximize throughput without out-of-memory errors.
 - **Multi-GPU parallelism** : Run independent MCMC chains across multiple GPUs with per-device process and batch scheduling.
-- **Variogram models** : Supporting Matérn, Exponential, Gaussian, and Spherical covariance models with anisotropic rotation/scaling.
+- - If we want to run n chains = [a1, a2, a3, ,.. an] and have 3 GPUs available. Each pass would go: [a1, a2, a3] -> [a4, a5, a6] -> [a7, a8, a9] -> [a10]
 
 ## Benchmarks
 
@@ -19,7 +27,7 @@ Main bottleneck is that Sequential Gaussian Simulation suffers on large grids (t
 
 ![benchmark-bindshalder-macayeal](tests/mcmc_benchmark_comparison.png)
 
-
+# 
 ## Repository Structure
 
 ```

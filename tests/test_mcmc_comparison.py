@@ -53,7 +53,7 @@ MIN_BLOCK_Y, MAX_BLOCK_Y = 5, 20
 # SGS params (matching notebook)
 SGS_NEIGHBORS = 48
 SGS_RADIUS    = 30e3
-SIGMA_MC      = 5
+SIGMA_MC      = 1.5
 
 bed_size = None
 
