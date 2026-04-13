@@ -1,22 +1,15 @@
 """
-test_normal_score_transform.py
-==============================
-Pytest suite comparing NormalScoreTransformGPU against sklearn's
+
+Pytest comparing NormalScoreTransformGPU against sklearn's
 QuantileTransformer across multiple synthetic data distributions.
 
-GPU availability
-----------------
+
 Tests run on GPU when CuPy is importable and a CUDA device exists.
 If neither is available the suite falls back to a thin NumPy shim so
 the *logic* can still be validated on any CI machine.
 
 Run on a GPU machine
---------------------
-    module load rapidsai/25.06 && python -m pytest test_normal_score_transform.py -v
 
-Run in CPU-only mode (shim)
----------------------------
-    FORCE_CPU=1 pytest test_normal_score_transform.py -v
 """
 
 from __future__ import annotations

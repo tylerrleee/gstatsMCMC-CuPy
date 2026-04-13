@@ -609,6 +609,7 @@ class chain_sgs_gpu(chain):
             max_memory_gb = 1500.0,
             dtype = cp.float64, 
             quiet = False,
+            sigma = self.sigma_mc
         )
 
         # plotting for real-time result update

@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from GPU.MCMC_cu import _preprocess as _preprocess_gpu
 from gstatsMCMC.MCMC import _preprocess as _preprocess_cpu
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 def to_numpy(x):
     """Convert CuPy array to NumPy if needed."""
     if hasattr(x, 'get'):
@@ -46,7 +45,6 @@ def make_test_inputs(shape=(20, 30), n_cond=15, seed=42):
     return xx, yy, grid, variogram, sim_mask, radius, stencil
 
 
-# ── fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope='module')
 def inputs():
@@ -69,7 +67,6 @@ def gpu_outputs(inputs):
     )
 
 
-# ── tests ─────────────────────────────────────────────────────────────────────
 
 class TestPreprocessOutputShape:
     def test_out_grid_shape(self, cpu_outputs, gpu_outputs, inputs):

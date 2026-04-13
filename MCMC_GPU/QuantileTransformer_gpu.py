@@ -1,5 +1,6 @@
 import cupy as cp
 from cupyx.scipy.special import erfinv, erf
+
 _SQRT2 = 1.4142135623730951        # math.sqrt(2), precomputed
 _BOUNDS_THRESHOLD = 1e-7           # sklearn's clipping epsilon
 import numpy as np
@@ -15,7 +16,6 @@ class NormalScoreTransformGPU:
 
     Usage
     -----
-    # one-time setup (in set_normal_transformation or pre-loop):
     gpu_nst = NormalScoreTransformGPU(sklearn_qt)
 
     # per-iteration (drop-in for nst_trans.transform / inverse_transform):
@@ -30,12 +30,13 @@ class NormalScoreTransformGPU:
             sklearn_qt: A fitted sklearn.preprocessing.QuantileTransformer
                 with output_distribution='normal' and a single feature column.
         """
-        # sklearn stores:
+        # https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.QuantileTransformer.html
+        # sklearn stores attributes:
         #   quantiles_  : shape (n_quantiles, n_features) — data values at each quantile level
         #   references_ : shape (n_quantiles,)            — uniform quantile levels in [0, 1]
         #
         # Forward transform:  data -> uniform (interp on quantiles_ -> references_)
-        #                     uniform -> normal (ppf, clipped to avoid ±inf)
+        #                     uniform -> normal (ppf, clipped to avoid inf)
         #
         # Inverse transform:  normal -> uniform (cdf)
         #                     uniform -> data (interp on references_ -> quantiles_)

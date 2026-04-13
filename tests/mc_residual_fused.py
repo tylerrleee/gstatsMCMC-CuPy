@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import time
 import numpy as np
 
-# ── Raw CUDA kernel ──────────────────────────────────────────
+#  Raw CUDA kernel 
 _mc_residual_kernel = cp.RawKernel(r'''
 extern "C" __global__
 void mc_residual(
@@ -44,7 +44,7 @@ void mc_residual(
     int r = idx / cols;
     int c = idx % cols;
 
-    // ── thickness at this cell ──────────────────────────────
+    // ── thickness at this cell 
     double thick = surf[idx] - bed[idx];
 
     // ── flux_x = velx * thick  →  d(flux_x)/dx along axis=1 (columns) ──
@@ -97,7 +97,7 @@ void mc_residual(
         dy_val = (fy_down - fy_up) * inv_2h;
     }
 
-    // ── final residual ──────────────────────────────────────
+    // ── final residual 
     res[idx] = dx_val + dy_val + dhdt[idx] - smb[idx];
 }
 ''', 'mc_residual')
@@ -274,7 +274,7 @@ if __name__ == '__main__':
     print(f"  All tests passed. Generating plot...")
     print(f"{'='*60}")
 
-    # ── Matplotlib Chart Generation ──────────────────────────────
+    # PLotting
     x = np.arange(len(grid_labels))
     width = 0.35
 
@@ -294,7 +294,6 @@ if __name__ == '__main__':
     # Using a log scale if the difference between small and full grid times is massive
     ax.set_yscale('log')
 
-    # Add exact values on top of the bars
     ax.bar_label(rects1, padding=3, fmt='%.1f')
     ax.bar_label(rects2, padding=3, fmt='%.1f')
 
@@ -305,9 +304,7 @@ if __name__ == '__main__':
                 f'{speedup_val:.2f}x Speedup', ha='center', va='bottom', 
                 fontweight='bold', color='black')
 
-    # Ensure layout fits well and display
     fig.tight_layout()
     
-    # Save the plot to disk before showing it
     plt.savefig(f'kernel_performance_{time.time()}.png', dpi=50)
     plt.show()

@@ -1,10 +1,15 @@
 
 import cupy as cp
 import numpy as np
+"""
+A Really mundane way of calcuating mass convservation residual
+using C kernels
 
-# ── Raw CUDA kernel ──────────────────────────────────────────
+"""
+# Raw CUDA kernel in C
 _mc_residual_kernel = cp.RawKernel(r'''
 extern "C" __global__
+                                   
 void mc_residual(
     const double* __restrict__ bed,
     const double* __restrict__ surf,
@@ -24,9 +29,10 @@ void mc_residual(
     int r = idx / cols;
     int c = idx % cols;
  
-    // ── thickness at this cell ──────────────────────────────
+    // BED THICKNESS
     double thick = surf[idx] - bed[idx];
- 
+    
+    // DX
     // ── flux_x = velx * thick  →  d(flux_x)/dx along axis=1 (columns) ──
     double dx_val;
     if (cols == 1) {
@@ -51,7 +57,8 @@ void mc_residual(
         double fx_right = velx[idx_r] * (surf[idx_r] - bed[idx_r]);
         dx_val = (fx_right - fx_left) * inv_2h;
     }
- 
+    
+    // DY 
     // ── flux_y = vely * thick  →  d(flux_y)/dy along axis=0 (rows) ──
     double dy_val;
     if (rows == 1) {
@@ -77,7 +84,7 @@ void mc_residual(
         dy_val = (fy_down - fy_up) * inv_2h;
     }
  
-    // ── final residual ──────────────────────────────────────
+    // FINAL RESIDUAL
     res[idx] = dx_val + dy_val + dhdt[idx] - smb[idx];
 }
 ''', 'mc_residual')
@@ -85,19 +92,19 @@ void mc_residual(
  
 def get_mass_conservation_residual_fused(bed, surf, velx, vely, dhdt, smb, resolution):
     """
-    Drop-in replacement for get_mass_conservation_residual_GPU.
+    replacement for get_mass_conservation_residual_GPU.
     Single kernel launch instead of 6+.
  
     All inputs must be 2D CuPy float64 arrays of the same shape.
     resolution is a Python float or int.
     Returns a 2D CuPy float64 array of the same shape.
     """
-    bed  = cp.asarray(bed, dtype=cp.float64)
-    surf = cp.asarray(surf, dtype=cp.float64)
-    velx = cp.asarray(velx, dtype=cp.float64)
-    vely = cp.asarray(vely, dtype=cp.float64)
-    dhdt = cp.asarray(dhdt, dtype=cp.float64)
-    smb  = cp.asarray(smb, dtype=cp.float64)
+    bed  = cp.asarray(bed, dtype  = cp.float64)
+    surf = cp.asarray(surf, dtype = cp.float64)
+    velx = cp.asarray(velx, dtype = cp.float64)
+    vely = cp.asarray(vely, dtype = cp.float64)
+    dhdt = cp.asarray(dhdt, dtype = cp.float64)
+    smb  = cp.asarray(smb, dtype  = cp.float64)
     
     rows, cols = bed.shape
     n = rows * cols
