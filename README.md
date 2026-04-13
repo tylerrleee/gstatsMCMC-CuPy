@@ -25,7 +25,11 @@ This produces a statistically plausible realization of the spatial field.
 
 Main bottleneck is that Sequential Gaussian Simulation suffers on large grids (this is ~1500x1500), so running SGS for N interations takes a longgggg time. Hence, utilizing GPU is necessary to speed up this process.
 
-![benchmark-bindshalder-macayeal](tests/mcmc_benchmark_comparison.png)
+## SSC for 100 iterations
+![Denman100](tests/DENMAN_benchmark_100iter.png)
+
+## SSC for 10000 iterations
+![Denman10000](tests/DENMAN_benchmark_10000iter.png)
 
 # 
 ## Repository Structure
@@ -114,12 +118,4 @@ chain.run(n_iterations=100_000)
 ```
 
 For a complete walkthrough with data loading, variogram fitting, and result visualization, see **[`scripts/T4_GPU_SmallScaleChain.ipynb`](scripts/T4_GPU_SmallScaleChain.ipynb)**.
-
-To run parallel chains across multiple GPUs:
-
-```python
-from smallScaleChain_multiprocessing_GPU import smallScaleChain_mp
-
-smallScaleChain_mp(n_chains=8, n_gpus=4, seeds_file="data/200_seeds.txt")
-```
 
