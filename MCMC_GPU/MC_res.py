@@ -33,7 +33,7 @@ void mc_residual(
     double thick = surf[idx] - bed[idx];
     
     // DX
-    // ── flux_x = velx * thick  →  d(flux_x)/dx along axis=1 (columns) ──
+    // ── flux_x = velx * thick  -->  d(flux_x)/dx along axis=1 (columns) ──
     double dx_val;
     if (cols == 1) {
         dx_val = 0.0;
@@ -59,7 +59,7 @@ void mc_residual(
     }
     
     // DY 
-    // ── flux_y = vely * thick  →  d(flux_y)/dy along axis=0 (rows) ──
+    // ── flux_y = vely * thick  ->>  d(flux_y)/dy along axis=0 (rows) ──
     double dy_val;
     if (rows == 1) {
         dy_val = 0.0;
